@@ -7,6 +7,7 @@
 ## 開発環境とバージョン
 
 OS: macOS Mojave
+
 qemu: QEMU emulator version 3.1.0
 
 ### Rust関連
