@@ -4,6 +4,8 @@
 //extern crate core;
 use core::panic::PanicInfo;
 
+mod vga_buffer;
+
 /// This function is called on panic.
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
