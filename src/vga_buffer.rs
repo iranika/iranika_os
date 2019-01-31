@@ -21,7 +21,7 @@ pub enum Color {
 }
 
 
-#[derive(Debug, Color, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ColorCode(u8);
 
 impl ColorCode {
@@ -65,7 +65,7 @@ impl Writer {
                 let col = self.column_position;
 
                 let color_code = self.color_code;
-                self.buffer.chars[row][cal] = ScreenChar {
+                self.buffer.chars[row][col] = ScreenChar {
                     ascii_character: byte,
                     color_code,
                 };
@@ -88,4 +88,16 @@ impl Writer {
 
         }
     }
+}
+
+pub fn print_something() {
+    let mut writer = Writer {
+        column_position: 0,
+        color_code: ColorCode::new(Color::Yellow, Color::Black),
+        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+    };
+
+    writer.write_byte(b'H');
+    writer.write_string("ello ");
+    writer.write_string("Wörld!");
 }
