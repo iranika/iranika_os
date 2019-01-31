@@ -211,9 +211,198 @@ byteをprintするとき、書き出しプログラムは現在の行がいっ�
 
 文字列全体をprintするには、それらをバイトに変換して1つずつprintする。
 
+```rs
+// in src/vga_buffer.rs
+
+impl Writer {
+    pub fn write_string(&mut self, s: &str) {
+        for byte in s.bytes() {
+            match byte {
+                // printable ASCII byte or newline
+                0x20...0x7e | b'\n' => self.write_byte(byte),
+                // not part of printable ASCII range
+                _ => self.write_byte(0xfe),
+            }
+
+        }
+    }
+}
+```
+
+(上記コードの解説)
+VGAテキストバッファはASCⅡとコードページ437の追加バイトだけをサポートしている。
+Rustの文字列はデフォルトでUTF-8なので、VGAテキストバッファがサポートしないバイトを含むかもしれない。
+print可能なASCⅡバイト(改行(\n)または、スペースから~文字の間(0x20...0x7e)にあてはまるバイト)とprint不可能なバイトを区別するためにmatchを使用します。
+print不可能なバイトについては、VGAハードウェア上の0xfeにあたる■をprintします。
 
 
+### Try it out!
+
+前述の動作を確認するために、画面に文字を表示するための一時的な関数を作ることにします。
+
+```rs
+// in src/vga_buffer.rs
+
+pub fn print_something() {
+    let mut writer = Writer {
+        column_position: 0,
+        color_code: ColorCode::new(Color::Yellow, Color::Black),
+        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+    };
+
+    writer.write_byte(b'H');
+    writer.write_string("ello ");
+    writer.write_string("Wörld!");
+}
+```
+
+```rs
+// in src/main.rs
+// overwrite _start()
+
+#[no_mangle]
+pub extern "C" fn _start() -> ! {
+    vga_buffer::print_something();
+
+    loop {}
+}
+```
+
+<!--
+最初に0xb800のVGAバッファを指すWriterを新規に作成します。
+The syntax for this might seem a bit strange: First, we cast the integer 0xb8000 as an mutable raw pointer. Then we convert it to a mutable reference by dereferencing it (through *) and immediately borrowing it again (through &mut). This conversion requires an unsafe block, since the compiler can't guarantee that the raw pointer is valid.
+
+Then it writes the byte b'H' to it. The b prefix creates a byte literal, which represents an ASCII character. By writing the strings "ello "' and "Wörld!", we test our write_string method and the handling of unprintable characters. When we call vga_buffer::print_something in our _start function (in src/main.rs), a Hello W■■rld! should be printed in the lower left corner of the screen in yellow:
+
+![QEMU](./image/sec3_qemu01.png)
+
+Notice that the ö is printed as two ■ characters. That's because ö is represented by two bytes in UTF-8, which both don't fall into the printable ASCII range. In fact, this is a fundamental property of UTF-8: the individual bytes of multi-byte values are never valid ASCII.
+-->
+
+## Volatile
+
+さて、メッセージが正しくprintされたことが確認できた。
+しかし、それはアグレッシブに最適化する将来のRustコンパイラでは、動作しないかもしれない。
+
+ここで問題なのは、Bufferには書き込むだけで、書き込んだものを永遠に読み取ることはないということだ。
+Rustコンパイラは、(通常のRAMの代わりに)VGAバッファメモリにアクセスしていることを知らないし、画面に文字が表示されることの副作用については何も知らない。
+そのため、これらの書き込みは不要で省略可能だとコンパイラが判断する可能性がある。
+(要は書き込むだけ読み取られることがないなら、使われていない処理(意味のない処理)だと判断されかねないということ)
+この誤った最適化を回避するには、書き込みをvolatile(揮発性なもの)として指定する必要がある。
+これは、書き込みには副作用があるため最適化しないでくれと、コンパイラに教える。
+
+VGAバッファにvolatileな書き込みを使うには、volateライブラリを使用します。
+このクレート(クレートはRustの世界で、パッケージを指す言葉)は、readとwriteメソッドを持つVolatileラッパー型を提供する。
+これらのメソッドは、内部的にCoreライブラリのread_volatileおよびwrite_volatile関数をしようしているため、read/writeが最適化されないことが保証されている。
+
+では、Cargo.tomlの依存セクションにvolatileクレートを追加しよう。
+
+```
+// in Cargo.toml
+[dependencies]
+volatile = "0.2.3"
+```
+
+"0.2.3"はセマンティックバージョンの数値です。
+詳細は、Cargoドキュメンテーションの依存関係の指定(Specifying Dependencies)のガイドを参照してください。
+
+それでは、volatileでVGAバッファを作り直すぞ。
+
+```rs
+// in src/vga_buffer.rs
+
+extern crate volatile;
+use self::volatile::Volatile;
+
+struct Buffer {
+    chars: [[Volatile<ScreenChar>; BUFFER_WIDTH]; BUFFER_HEIGHT],
+}
+```
+
+ScreenCharの代わりに、Volate<ScreenChar>を使っている。
+(Volate型はgenericで、大体のあらゆる型をラップできる)
+これにより通常の書き込みで、誤った書き込みをしないことが保証される。
+(誤った書き込みとは、参照先の消失など)
+代わりに、書き込みにはwriteメソッドを使う必要がある。
+
+つまり、僕らが作った`Writer::write_byte`メソッドを一部修正する必要がある。
+
+```rs
+// in src/vga_buffer.rs
+
+impl Writer {
+    pub fn write_byte(&mut self, byte: u8) {
+        match byte {
+            b'\n' => self.new_line(),
+            byte => {
+                ...
+                /* old code
+                self.buffer.chars[row][col] = ScreenChar {
+                    ascii_character: byte,
+                    color_code,
+                };
+                */
+                self.buffer.chars[row][col].write(ScreenChar {
+                    ascii_character: byte,
+                    color_code: color_code,
+                });
+                ...
+            }
+        }
+    }
+    ...
+}
+```
+
+通常の代入の`=`を使う代わりに、新たに`write`メソッドを使っている。
+これで、コンパイラがこの書き込み処理を永遠に最適化しないことが保証された。
+
+## Formatting Macros
+
+Rustのフォーマットマクロもサポートできれば、素晴らしいと思いませんか？
+そうすれば、浮動小数や整数のような異なる型でも簡単にprintすることができる。
+それらをサポートするには、`core::fmt::Write`トレイトを実装する必要がある。
+このトレイトに求められるメソッドは、`write_str`メソッドのみです。
+これは、僕らが実装してきた`write_string`メソッドと非常に似ていますが、
+戻り値が`fmt::Result`です。
+
+```rs
+// in src/vga_buffer.rs
+use core::fmt;
+
+impl fmt::Write for Writer {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        self.write_string(s);
+        Ok(())
+    }
+}
+```
+
+`Ok(())`は`()`型を格納した、Result型の`Ok`を返します。
+
+これで、Rustのビルトインフォーマットマクロの`write!`と`writeln!`が使えるようになりました。
+
+```rs
+// in src/vga_buffer.rs
+
+pub fn print_something() {
+    use core::fmt::Write;
+    let mut writer = Writer {
+        column_position: 0,
+        color_code: ColorCode::new(Color::Yellow, Color::Black),
+        buffer: unsafe { &mut *(0xb8000 as *mut Buffer) },
+    };
+
+    writer.write_byte(b'H');
+    writer.write_string("ello! ");
+    write!(writer, "The numbers are {} and {}", 42, 1.0/3.0).unwrap();
+}
+```
+
+`write!`はResult型を返すので、そのままだと戻り値を返す先がないためにコンパイラが警告を出します。
+なので、雑ですがunwrap()を使いました。
+VGAバッファへの書き込みが失敗することはほぼありえないので、あまり問題になりません。
 
 
-
+## Newlines
 
