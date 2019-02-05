@@ -406,3 +406,53 @@ VGAバッファへの書き込みが失敗することはほぼありえない�
 
 ## Newlines
 
+現時点では、行に収まらない改行と文字は無視する状態だ。
+代わりに、すべての文字を一行上に移動させて、その下の行(最後の行)の先頭から再開する。
+(一番上の行は、削除される)
+これを行うには、Writerのnew_lineメソッドの実装を追加する。
+
+```rs
+impl Writer {
+    fn new_line(&mut self) {
+        //1行目から(最後の行-1)までのrow up繰り返し処理
+        for row in 1..BUFFER_HEIGHT {
+            for col in 0..BUFFER_WIDTH {
+                let character = self.buffer.chars[row][col].read();
+                self.buffer.chars[row - 1][col].write(character);
+            }
+        }
+        //最後の行をクリア
+        self.clear_row(BUFFER_HEIGHT - 1);
+        self.column_position = 0;
+    }
+
+    fn clear_row(&mut self, row: usize) {/* TODO */}
+}
+```
+
+表示されているすべての文字を、それぞれ1行上に移動させるために繰り返し処理をします。
+range表記の`..`は上限を含まないため、`1..BUFFER_HEIGHT`は`1~(BUFFER_HEIGHT -1)`であることに注意してください。
+
+さて、改行処理を完成させるために、clear_rowメソッドを追加します。
+
+```rs
+// in src/vga_buffer.rs
+
+impl Writer {
+    fn clear_row(&mut self, row: usize) {
+        let blank = ScreenChar {
+            ascii_character: b' ',
+            color_code: self.color_code,
+        };
+        for col in 0..BUFFER_WIDTH {
+            self.buffer.chars[row][col].write(blank);
+        }
+    }
+}
+```
+
+
+
+
+## 
+
